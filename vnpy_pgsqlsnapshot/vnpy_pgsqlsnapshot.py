@@ -49,18 +49,20 @@ create table if not exists public.vnpy_tradedata(
     orderid varchar(100),
     tradeid varchar(100),
     direction varchar(5),
+    "offset"   text,
     price     float,
     volume    float,
     "datetime" timestamp(0),
-    CONSTRAINT orderid_unique UNIQUE (orderid)
+    CONSTRAINT orderid_tradeid_unique UNIQUE (orderid,tradeid)
 )
 '''
 
 SNAP_TRADEDATA_TABLE_SCRIPT='''
 INSERT INTO public.vnpy_tradedata
-(gateway_name, symbol, exchange, orderid, tradeid, direction, price, volume, "datetime")
+(gateway_name, symbol, exchange, orderid, tradeid, direction, "offset", price, volume, "datetime")
 VALUES
-(%(gateway_name)s, %(symbol)s, %(exchange)s, %(orderid)s, %(tradeid)s, %(direction)s, %(price)s, %(volume)s, current_timestamp)
+(%(gateway_name)s, %(symbol)s, %(exchange)s, %(orderid)s, %(tradeid)s, %(direction)s, %(offset)s, %(price)s, %(volume)s, current_timestamp)
+ON CONFLICT (orderid, tradeid) DO NOTHING
 '''
 
 SNAP_ACCOUNT_TABLE_SCRIPT='''
@@ -126,7 +128,8 @@ class PgsqlSnapshotEngine( BaseEngine ):
         d["exchange"] = trade.exchange.value
         d["orderid"]  = f"{trade.orderid}"
         d["tradeid"]  = f"{trade.tradeid}"
-        d["direction"]  = trade.direction.value
+        d["direction"] = trade.direction.value
+        d["offset"]    = trade.offset.value
         d["price"]  = trade.price
         d["volume"]  = trade.volume
         trade_data.append(d)

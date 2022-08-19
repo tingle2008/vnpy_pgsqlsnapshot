@@ -20,9 +20,84 @@ create table if not exists public.vnpy_account(
     accountid varchar(50),
     balance float,
     frozen  float,
-    last_update_time timestamp(0),
+    updated_at timestamp(0),
     CONSTRAINT gw_account_unique UNIQUE (gateway_name, accountid)
 )
+'''
+
+CREATE_ACCOUNT_SNAPSHOT_SCRIPT='''
+create table if not exists public.vnpy_account_snapshot(
+    id serial,
+    gateway_name varchar(50),
+    accountid varchar(50),
+    balance float,
+    frozen  float,
+    created_at timestamp(0)
+)
+'''
+
+CREATE_ACCOUNT_SNAPSHOT_PROCESS_SCRIPT='''
+CREATE OR REPLACE FUNCTION public.process_vnpy_account_snap() RETURNS TRIGGER AS $_$
+BEGIN
+
+IF (TG_OP = 'INSERT') THEN
+   INSERT INTO public.vnpy_account_snapshot (gateway_name,
+                                      accountid,
+                                      balance,
+                                      frozen,
+                                      created_at)
+          VALUES (NEW.gateway_name,
+                  NEW.accountid,
+                  NEW.balance,
+                  NEW.frozen,
+                  NEW.updated_at);
+
+ELSIF (TG_OP = 'UPDATE') THEN
+
+   IF (NEW.balance != OLD.balance) or (NEW.frozen != OLD.frozen) THEN
+        RAISE NOTICE 'Balance was changed';
+        INSERT INTO public.vnpy_account_snapshot (gateway_name,
+                                           accountid,
+                                           balance,
+                                           frozen,
+                                           created_at)
+               VALUES (NEW.gateway_name,
+                       NEW.accountid,
+                       NEW.balance,
+                       NEW.frozen,
+                       NEW.updated_at);
+   ELSE
+        RAISE NOTICE 'Nothing changed';
+   END IF;
+END IF;
+
+RETURN NULL;
+
+END;
+$_$ LANGUAGE plpgsql
+'''
+
+CREATE_ACCOUNT_SNAP_TRIGGER='''
+CREATE OR REPLACE TRIGGER vnpy_account_snap
+AFTER INSERT OR UPDATE ON public.vnpy_account
+FOR EACH ROW EXECUTE FUNCTION public.process_vnpy_account_snap();
+'''
+
+CREATE_ACCOUNT_SNAPSHOT_CREATED_AT_INDEX='''
+create index if not exists vnpy_account_snapshot_created_at_idx 
+        on public.vnpy_account_snapshot 
+        using brin(created_at)
+'''
+
+SNAP_ACCOUNT_TABLE_SCRIPT='''
+INSERT INTO public.vnpy_account
+(gateway_name, accountid, balance, frozen, updated_at)
+VALUES
+(%(gateway_name)s, %(accountid)s, %(balance)s, %(frozen)s, CURRENT_TIMESTAMP)
+ON CONFLICT (gateway_name, accountid) DO UPDATE
+SET balance = excluded.balance,
+frozen      = excluded.frozen,
+updated_at = current_timestamp
 '''
 
 CREATE_POSITION_TABLE_SCRIPT='''
@@ -36,49 +111,36 @@ create table if not exists public.vnpy_position(
     price     float,
     pnl       float,
     yd_volume float,
-    last_update_time timestamp(0),
+    updated_at timestamp(0),
     CONSTRAINT position_gw_symbol_unique UNIQUE (gateway_name,symbol)
 )
 '''
 
-CREATE_TRADEDATA_TABLE_SCRIPT='''
-create table if not exists public.vnpy_tradedata(
+CREATE_POSITION_SNAPSHOT_SCRIPT='''
+create table if not exists public.vnpy_position_snapshot(
+    id serial,
     gateway_name varchar(50),
-    symbol varchar(100),
-    exchange varchar(50),
-    orderid varchar(100),
-    tradeid varchar(100),
+    symbol   varchar(100),
+    exchange varchar(100),
     direction varchar(5),
-    "offset"   text,
-    price     float,
     volume    float,
-    "datetime" timestamp(0),
-    CONSTRAINT orderid_tradeid_unique UNIQUE (orderid,tradeid)
+    frozen    float,
+    price     float,
+    pnl       float,
+    yd_volume float,
+    created_at timestamp(0)
 )
 '''
 
-SNAP_TRADEDATA_TABLE_SCRIPT='''
-INSERT INTO public.vnpy_tradedata
-(gateway_name, symbol, exchange, orderid, tradeid, direction, "offset", price, volume, "datetime")
-VALUES
-(%(gateway_name)s, %(symbol)s, %(exchange)s, %(orderid)s, %(tradeid)s, %(direction)s, %(offset)s, %(price)s, %(volume)s, current_timestamp)
-ON CONFLICT (orderid, tradeid) DO NOTHING
-'''
-
-SNAP_ACCOUNT_TABLE_SCRIPT='''
-INSERT INTO public.vnpy_account
-(gateway_name, accountid, balance, frozen, last_update_time)
-VALUES
-(%(gateway_name)s, %(accountid)s, %(balance)s, %(frozen)s, now())
-ON CONFLICT (gateway_name, accountid) DO UPDATE
-SET balance = excluded.balance,
-frozen      = excluded.frozen,
-last_update_time = current_timestamp
+CREATE_POSITION_SNAPSHOT_CREATED_AT_INDEX='''
+create index if not exists vnpy_position_snapshot_created_at_idx 
+        on public.vnpy_position_snapshot 
+        using brin(created_at)
 '''
 
 SNAP_POSITION_TABLE_SCRIPT='''
 INSERT INTO public.vnpy_position
-(gateway_name, symbol, exchange, direction, volume, frozen, price, pnl, yd_volume, last_update_time)
+(gateway_name, symbol, exchange, direction, volume, frozen, price, pnl, yd_volume, updated_at)
 VALUES
 (%(gateway_name)s, %(symbol)s, %(exchange)s, %(direction)s, %(volume)s, %(frozen)s, %(price)s, %(pnl)s, %(yd_volume)s, current_timestamp)
 ON CONFLICT (gateway_name, symbol) DO UPDATE
@@ -89,7 +151,98 @@ frozen       = excluded.frozen,
 price        = excluded.price,
 pnl          = excluded.pnl,
 yd_volume    = excluded.yd_volume,
-last_update_time = current_timestamp;
+updated_at   = current_timestamp;
+'''
+
+CREATE_POSITION_SNAPSHOT_PROCESS_SCRIPT='''
+CREATE OR REPLACE FUNCTION public.process_vnpy_position_snap() RETURNS TRIGGER AS $_$
+BEGIN
+
+IF (TG_OP = 'INSERT') THEN
+   INSERT INTO public.vnpy_position_snapshot (gateway_name,
+                                              symbol,
+                                              exchange,
+                                              direction,
+                                              volume,
+                                              frozen,
+                                              price,
+                                              pnl,
+                                              yd_volume,
+                                              created_at)
+          VALUES (NEW.gateway_name,
+                  NEW.symbol,
+                  NEW.exchange,
+                  NEW.direction,
+                  NEW.volume,
+                  NEW.frozen,
+                  NEW.price,
+                  NEW.pnl,
+                  NEW.yd_volume,
+                  NEW.updated_at);
+
+ELSIF (TG_OP = 'UPDATE') THEN
+
+   IF (NEW.volume != OLD.volume) or (NEW.price != OLD.price) or (NEW.pnl != OLD.pnl) THEN
+        RAISE NOTICE 'New record changed';
+
+        INSERT INTO public.vnpy_position_snapshot (gateway_name,
+                                              symbol,
+                                              exchange,
+                                              direction,
+                                              volume,
+                                              frozen,
+                                              price,
+                                              pnl,
+                                              yd_volume,
+                                              created_at)
+          VALUES (NEW.gateway_name,
+                  NEW.symbol,
+                  NEW.exchange,
+                  NEW.direction,
+                  NEW.volume,
+                  NEW.frozen,
+                  NEW.price,
+                  NEW.pnl,
+                  NEW.yd_volume,
+                  NEW.updated_at);
+   ELSE
+        RAISE NOTICE 'Nothing changed';
+   END IF;
+END IF;
+
+RETURN NULL;
+
+END;
+$_$ LANGUAGE plpgsql
+'''
+
+CREATE_POSITION_SNAP_TRIGGER='''
+CREATE OR REPLACE TRIGGER vnpy_position_snap
+AFTER INSERT OR UPDATE ON public.vnpy_position
+FOR EACH ROW EXECUTE FUNCTION public.process_vnpy_position_snap();
+'''
+
+CREATE_TRADEDATA_TABLE_SCRIPT='''
+create table if not exists public.vnpy_tradedata(
+    gateway_name varchar(50),
+    symbol varchar(100),
+    exchange varchar(50),
+    orderid varchar(100),
+    tradeid varchar(100),
+    direction  varchar(5),
+    "offset"   text,
+    price      float,
+    volume     float,
+    "datetime" timestamp(0),
+    CONSTRAINT orderid_unique UNIQUE (orderid)
+)
+'''
+
+SNAP_TRADEDATA_TABLE_SCRIPT='''
+INSERT INTO public.vnpy_tradedata
+(gateway_name, symbol, exchange, orderid, tradeid, direction, "offset", price, volume, "datetime")
+VALUES
+(%(gateway_name)s, %(symbol)s, %(exchange)s, %(orderid)s, %(tradeid)s, %(direction)s, %(offset)s, %(price)s, %(volume)s, current_timestamp)
 '''
 
 class PgsqlSnapshotEngine( BaseEngine ):
@@ -100,11 +253,23 @@ class PgsqlSnapshotEngine( BaseEngine ):
         self.host: str = SETTINGS["database.host"]
         self.port: int = SETTINGS["database.port"]
         self.db: str = SETTINGS["database.database"]
+        con_str = f"postgres://{self.user}:{self.password}@{self.host}:{self.port}/{self.db}"
 
-        self.connection: psycopg2.connection = psycopg2.connect(f"postgres://{self.user}:{self.password}@{self.host}:{self.port}/{self.db}")
+        self.connection: psycopg2.connection = psycopg2.connect(con_str)
         self.cursor: psycopg2.cursor = self.connection.cursor()
+
         self.execute(CREATE_ACCOUNT_TABLE_SCRIPT)
+        self.execute(CREATE_ACCOUNT_SNAPSHOT_SCRIPT)
+        self.execute(CREATE_ACCOUNT_SNAPSHOT_CREATED_AT_INDEX)
+        self.execute(CREATE_ACCOUNT_SNAPSHOT_PROCESS_SCRIPT)
+        self.execute(CREATE_ACCOUNT_SNAP_TRIGGER)
+
         self.execute(CREATE_POSITION_TABLE_SCRIPT)
+        self.execute(CREATE_POSITION_SNAPSHOT_SCRIPT)
+        self.execute(CREATE_POSITION_SNAPSHOT_CREATED_AT_INDEX)
+        self.execute(CREATE_POSITION_SNAPSHOT_PROCESS_SCRIPT)
+        self.execute(CREATE_POSITION_SNAP_TRIGGER)
+
         self.execute(CREATE_TRADEDATA_TABLE_SCRIPT)
 
         self.register_event()
@@ -128,8 +293,8 @@ class PgsqlSnapshotEngine( BaseEngine ):
         d["exchange"] = trade.exchange.value
         d["orderid"]  = f"{trade.orderid}"
         d["tradeid"]  = f"{trade.tradeid}"
-        d["direction"] = trade.direction.value
-        d["offset"]    = trade.offset.value
+        d["direction"]  = trade.direction.value
+        d["offset"]  = trade.offset.value
         d["price"]  = trade.price
         d["volume"]  = trade.volume
         trade_data.append(d)
@@ -164,7 +329,9 @@ class PgsqlSnapshotEngine( BaseEngine ):
 
     def execute(self, query: str, data: Any = None) -> None:
         """执行SQL查询"""
-        if query in { SNAP_ACCOUNT_TABLE_SCRIPT, SNAP_POSITION_TABLE_SCRIPT, SNAP_TRADEDATA_TABLE_SCRIPT }:
+        if query in { SNAP_ACCOUNT_TABLE_SCRIPT, 
+                      SNAP_POSITION_TABLE_SCRIPT, 
+                      SNAP_TRADEDATA_TABLE_SCRIPT }:
             self.cursor.executemany(query, data)
         else:
             self.cursor.execute(query, data)

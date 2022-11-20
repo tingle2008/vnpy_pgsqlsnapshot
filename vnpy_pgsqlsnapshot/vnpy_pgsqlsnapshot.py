@@ -1,14 +1,22 @@
 # flake8: noqa
 
 import psycopg2
+import pprint
 from typing import Dict, List, Any
 from vnpy.event import EventEngine
 from vnpy.trader.engine import MainEngine,BaseEngine
 from vnpy.trader.event import (
-    EVENT_ORDER,
     EVENT_TRADE,
+    EVENT_TICK,
     EVENT_POSITION,
     EVENT_ACCOUNT
+)
+
+from vnpy.trader.constant import (
+        Exchange
+        )
+from vnpy.trader.object import (
+    SubscribeRequest
 )
 
 from vnpy.event import Event, EventEngine
@@ -34,53 +42,6 @@ create table if not exists public.vnpy_account_snapshot(
     frozen  float,
     created_at timestamp(0)
 )
-'''
-
-CREATE_ACCOUNT_SNAPSHOT_PROCESS_SCRIPT='''
-CREATE OR REPLACE FUNCTION public.process_vnpy_account_snap() RETURNS TRIGGER AS $_$
-BEGIN
-
-IF (TG_OP = 'INSERT') THEN
-   INSERT INTO public.vnpy_account_snapshot (gateway_name,
-                                      accountid,
-                                      balance,
-                                      frozen,
-                                      created_at)
-          VALUES (NEW.gateway_name,
-                  NEW.accountid,
-                  NEW.balance,
-                  NEW.frozen,
-                  NEW.updated_at);
-
-ELSIF (TG_OP = 'UPDATE') THEN
-
-   IF (NEW.balance != OLD.balance) or (NEW.frozen != OLD.frozen) THEN
-        RAISE NOTICE 'Balance was changed';
-        INSERT INTO public.vnpy_account_snapshot (gateway_name,
-                                           accountid,
-                                           balance,
-                                           frozen,
-                                           created_at)
-               VALUES (NEW.gateway_name,
-                       NEW.accountid,
-                       NEW.balance,
-                       NEW.frozen,
-                       NEW.updated_at);
-   ELSE
-        RAISE NOTICE 'Nothing changed';
-   END IF;
-END IF;
-
-RETURN NULL;
-
-END;
-$_$ LANGUAGE plpgsql
-'''
-
-CREATE_ACCOUNT_SNAP_TRIGGER='''
-CREATE OR REPLACE TRIGGER vnpy_account_snap
-AFTER INSERT OR UPDATE ON public.vnpy_account
-FOR EACH ROW EXECUTE FUNCTION public.process_vnpy_account_snap();
 '''
 
 CREATE_ACCOUNT_SNAPSHOT_CREATED_AT_INDEX='''
@@ -132,18 +93,18 @@ create table if not exists public.vnpy_position_snapshot(
 )
 '''
 
-CREATE_POSITION_SNAPSHOT_CREATED_AT_INDEX='''
+CREATE_POSITION_SNAPSHOT_CREATED_AT_INDEX = '''
 create index if not exists vnpy_position_snapshot_created_at_idx 
         on public.vnpy_position_snapshot 
         using brin(created_at)
 '''
 
-SNAP_POSITION_TABLE_SCRIPT='''
+SNAP_POSITION_TABLE_SCRIPT = '''
 INSERT INTO public.vnpy_position
 (gateway_name, symbol, exchange, direction, volume, frozen, price, pnl, yd_volume, updated_at)
 VALUES
 (%(gateway_name)s, %(symbol)s, %(exchange)s, %(direction)s, %(volume)s, %(frozen)s, %(price)s, %(pnl)s, %(yd_volume)s, current_timestamp)
-ON CONFLICT (gateway_name, symbol) DO UPDATE
+ON CONFLICT (gateway_name, symbol ) DO UPDATE
 SET exchange = excluded.exchange,
 direction    = excluded.direction,
 volume       = excluded.volume,
@@ -152,6 +113,61 @@ price        = excluded.price,
 pnl          = excluded.pnl,
 yd_volume    = excluded.yd_volume,
 updated_at   = current_timestamp;
+'''
+
+CREATE_GREEKS_TABLE_SCRIPT='''
+create table if not exists public.vnpy_greeks(
+    gateway_name varchar(50),
+    symbol varchar(100),
+    exchange varchar(100),
+    implied_volatility float,
+    delta  float,
+    option_price float,
+    gamma float,
+    vega float,
+    theta float,
+    und_price float,
+    updated_at timestamp(0),
+    CONSTRAINT grees_gw_symbol_unique UNIQUE (gateway_name,symbol)
+)
+'''
+
+CREATE_GREEKS_SNAPSHOT_SCRIPT='''
+create table if not exists public.vnpy_greeks_snapshot(
+    id serial,
+    gateway_name varchar(50),
+    symbol varchar(100),
+    exchange varchar(100),
+    implied_volatility float,
+    delta  float,
+    option_price float,
+    gamma float,
+    vega float,
+    theta float,
+    und_price float,
+    created_at timestamp(0)
+)
+'''
+SNAP_GREEKS_TABLE_SCRIPT = '''
+INSERT INTO public.vnpy_greeks
+(gateway_name, symbol, exchange, implied_volatility, delta, option_price, gamma, vega, theta, und_price, updated_at)
+VALUES
+(%(gateway_name)s, %(symbol)s, %(exchange)s, %(implied_volatility)s, %(delta)s, %(option_price)s, %(gamma)s, %(vega)s, %(theta)s, %(und_price)s, current_timestamp)
+ON CONFLICT (gateway_name, symbol ) DO UPDATE
+SET exchange = excluded.exchange,
+implied_volatility = excluded.implied_volatility,
+delta = excluded.delta,
+option_price = excluded.option_price,
+gamma  = excluded.gamma,
+vega = excluded.vega,
+theta = excluded.theta,
+und_price = excluded.und_price,
+updated_at = current_timestamp;
+'''
+CREATE_GREEKS_SNAPSHOT_CREATED_AT_INDEX = '''
+create index if not exists vnpy_greeks_snapshot_created_at_idx 
+        on public.vnpy_greeks_snapshot
+        using brin(created_at)
 '''
 
 CREATE_POSITION_SNAPSHOT_PROCESS_SCRIPT='''
@@ -261,8 +277,11 @@ class PgsqlSnapshotEngine( BaseEngine ):
         self.execute(CREATE_ACCOUNT_TABLE_SCRIPT)
         self.execute(CREATE_ACCOUNT_SNAPSHOT_SCRIPT)
         self.execute(CREATE_ACCOUNT_SNAPSHOT_CREATED_AT_INDEX)
-        self.execute(CREATE_ACCOUNT_SNAPSHOT_PROCESS_SCRIPT)
-        self.execute(CREATE_ACCOUNT_SNAP_TRIGGER)
+
+        self.execute(CREATE_GREEKS_TABLE_SCRIPT)
+        self.execute(CREATE_GREEKS_SNAPSHOT_SCRIPT)
+        self.execute(CREATE_GREEKS_SNAPSHOT_CREATED_AT_INDEX)
+        #self.execute(SNAP_GREEKS_TABLE_SCRIPT)
 
         self.execute(CREATE_POSITION_TABLE_SCRIPT)
         self.execute(CREATE_POSITION_SNAPSHOT_SCRIPT)
@@ -271,18 +290,33 @@ class PgsqlSnapshotEngine( BaseEngine ):
         self.execute(CREATE_POSITION_SNAP_TRIGGER)
 
         self.execute(CREATE_TRADEDATA_TABLE_SCRIPT)
-
         self.register_event()
 
-    def add_function(self) -> None:
-        self.main_engine.runit = self.runit
-
-    # nothing just for add_function as a test.
-    def run(self):
-        print("running it")
 
     def register_event(self) -> None:
         self.event_engine.register(EVENT_TRADE, self.snap_trade_event)
+        self.event_engine.register(EVENT_TICK, self.snap_greeks_event)
+
+    def snap_greeks_event(self,event: Event) -> None:
+
+        greeks_data: List[dict] = []
+        tick: TickData = event.data
+        if tick.und_price is None or tick.implied_volatility == 0:
+            return
+
+        g = {}
+        g["gateway_name"] = tick.gateway_name
+        g["symbol"] = tick.symbol
+        g["exchange"] = tick.exchange.value
+        g["implied_volatility"] = tick.implied_volatility
+        g["delta"] = tick.delta
+        g["option_price"] = tick.option_price
+        g["gamma"] = tick.gamma
+        g["vega"] = tick.vega
+        g["theta"] = tick.theta
+        g["und_price"] = tick.und_price
+        greeks_data.append(g)
+        self.execute(SNAP_GREEKS_TABLE_SCRIPT,g)
 
     def snap_trade_event(self, event: Event) -> None:
         trade_data: List[dict] = []
@@ -325,7 +359,11 @@ class PgsqlSnapshotEngine( BaseEngine ):
             d["pnl"] = position.pnl 
             d["yd_volume"] = position.yd_volume 
             position_data.append(d)
+            #if position_data.
+            req: SubscribeRequest = SubscribeRequest( symbol=position.symbol, exchange=Exchange(position.exchange.value))
+            self.main_engine.subscribe(req, gateway_name=position.gateway_name)
         self.execute(SNAP_POSITION_TABLE_SCRIPT,position_data)
+
 
     def execute(self, query: str, data: Any = None) -> None:
         """执行SQL查询"""
